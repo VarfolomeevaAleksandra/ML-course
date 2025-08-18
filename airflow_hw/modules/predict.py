@@ -2,15 +2,18 @@ import joblib
 import os
 import json
 
+from datetime import datetime
 import pandas as pd
 from pydantic import BaseModel
 import glob
 
 path = os.environ.get('PROJECT_PATH', '.')
-
+print(path)
 models_dir = os.path.join(path, "data", "models")
 model_files = glob.glob(os.path.join(models_dir, "cars_pipe_*.pkl"))
+print(model_files)
 model_path = max(model_files, key=os.path.getctime)  # берём самый новый
+print(model_path)
 model = joblib.load(model_path)
 
 #model_path = os.path.join(path, "data", "models", "cars_pipe_202508182007.pkl")
@@ -61,7 +64,6 @@ results = []
 
 
 def predict():
-    import modules.pipeline
     with open(model_path, 'rb') as file:
         model = joblib.load(file)
     for filename in os.listdir(test_folder_path):
@@ -73,7 +75,7 @@ def predict():
             "pred": y[0],
             "price": data.price
         })
-    predict_path = os.path.join(path, "data", "predictions", "predictions.csv")
+    predict_path = os.path.join(path, "data", "predictions", f"predictions_{datetime.now().strftime('%Y%m%d%H%M')}.csv")
     prediction = pd.DataFrame(results)
     prediction.to_csv(predict_path, index=False, encoding="utf-8")
 
