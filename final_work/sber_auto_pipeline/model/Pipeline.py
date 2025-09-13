@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import re
 import regex
+import unicodedata
 
 
 import dill
@@ -240,9 +241,73 @@ def pre_drop(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def make_session_stats(df_hits: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
+    session_stats = (
+        df_hits[["session_id", "hit_number", "hit_time", "hit_page_path", "event_action"]]
+        .copy()
+        .dropna(subset=["hit_time"])
+        .groupby("session_id")
+        .agg(
+            hits=("hit_number", "count"),
+            duration=("hit_time", "max"),
+            uniq_pages=("hit_page_path", "nunique"),
+            uniq_events=("event_action", "nunique")
+        )
+        .reset_index()
+        .merge(df[["session_id", "client_id"]], on="session_id", how="left")
+    )
+    # clicks per sec
+    session_stats["clicks_per_sec"] = (
+        session_stats["hits"] / (session_stats["duration"] / 1000).clip(lower=1)
+    )
+    return session_stats
+
+
+def make_client_visits(df: pd.DataFrame) -> pd.DataFrame:
+    return (
+        df.groupby(["client_id", "visit_date"])["session_id"]
+        .count()
+        .reset_index(name="visits_per_day")
+    )
+
+
+def detect_anomalies_iqr(session_stats, client_visits, k=5):
+    anomalies = {}
+
+    # clicks per second
+    q1, q3 = session_stats["clicks_per_sec"].quantile([0.25, 0.75])
+    iqr = q3 - q1
+    upper = q3 + k * iqr
+    anomalies["clicks_per_sec"] = session_stats.loc[
+        session_stats["clicks_per_sec"] > upper, "session_id"
+    ]
+
+    # uniq pages per session
+    q1, q3 = session_stats["uniq_pages"].quantile([0.25, 0.75])
+    iqr = q3 - q1
+    upper = q3 + k * iqr
+    anomalies["uniq_pages"] = session_stats.loc[
+        session_stats["uniq_pages"] > upper, "session_id"
+    ]
+
+    # visits per day (по client_id)
+    upper = client_visits["visits_per_day"].quantile(0.995)  # 99.5 перцентиль
+    anomalous_clients = client_visits.loc[client_visits["visits_per_day"] > upper, "client_id"]
+
+    # Переводим аномальных клиентов → их сессии
+    anomalies["visits_per_day"] = session_stats.loc[
+        session_stats["client_id"].isin(anomalous_clients), "session_id"
+    ]
+
+    # Объединяем все session_id
+    fraud_sessions = pd.concat(list(anomalies.values())).unique()
+
+    return fraud_sessions
+
+
 def not_set(df: pd.DataFrame) -> pd.DataFrame:
     df_copy = df.copy()
-    df_copy.replace(["(not set)"], np.nan, inplace = True)
+    df_copy.replace(["(not set)"], np.nan, inplace=True)
     return df_copy
 
 
@@ -273,6 +338,7 @@ def standard_city(df: pd.DataFrame) -> pd.DataFrame:
         "w.": "west",
         "w": "west"
     }
+
     def clean_city(city):
         if not isinstance(city, str):
             return "unknown"
@@ -311,8 +377,17 @@ def standard_city(df: pd.DataFrame) -> pd.DataFrame:
     return df_copy
 
 
+def remove_diacritics(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df['geo_country'] = df['geo_country'].astype(str).apply(
+        lambda x: unicodedata.normalize('NFKD', x).encode('ascii', 'ignore').decode('utf-8'))
+    print(df.columns)
+    return df
+
+
 def standard_browser(df: pd.DataFrame) -> pd.DataFrame:
     df_copy = df.copy()
+
     def clean_browser(value):
         if isinstance(value, str):
             val = value.lower()
@@ -386,12 +461,19 @@ def drop_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-
 def main():
     df = pd.read_csv('data/ga_sessions.csv')
-    df_hits = pd.read_csv("data/ga_hits-001.csv", usecols=["session_id", "event_action"])
+    df_hits = pd.read_csv("data/ga_hits-001.csv", usecols=["session_id", "hit_number", "hit_time",
+                                                           "hit_page_path", "event_action"])
 
     df = target(df, df_hits)
+
+    session_stats = make_session_stats(df_hits, df)
+    client_visits = make_client_visits(df)
+
+    fraud_sessions = detect_anomalies_iqr(session_stats, client_visits, k=5)
+    df = df[~df["session_id"].isin(fraud_sessions)]
+
     df = pre_drop(df)
 
     X = df.drop('event_value', axis = 1)
@@ -400,6 +482,7 @@ def main():
         ("replace_notset", FunctionTransformer(func=not_set)),
         ("os_fill", OSByBrandFiller()),
         ("city_clean", FunctionTransformer(func=standard_city)),
+        ("remove_diacritics", FunctionTransformer(func=remove_diacritics)),
         ("browser_clean", FunctionTransformer(func=standard_browser)),
         ("os_split", FunctionTransformer(func=os_split)),
         ("delete_space", FunctionTransformer(func=delete_space)),
