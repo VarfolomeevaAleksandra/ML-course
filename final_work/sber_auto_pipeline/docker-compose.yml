@@ -1,0 +1,10 @@
+services:
+  sber_pipeline:
+    build: .
+    container_name: sber_pipeline
+    volumes:
+      - ./data:/app/model/data                 # CSV и промежуточные данные
+      - ./model:/app/model               # здесь сохраняется sberauto_pipe.pkl
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

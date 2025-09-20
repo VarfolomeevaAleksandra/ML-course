@@ -1,0 +1,6 @@
+*.csv
+*.pkl
+*.dill
+__pycache__/
+*.log
+.git
